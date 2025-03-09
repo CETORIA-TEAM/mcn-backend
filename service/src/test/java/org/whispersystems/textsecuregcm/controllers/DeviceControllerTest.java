@@ -12,7 +12,6 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyByte;
 import static org.mockito.Mockito.anyString;
 import static org.mockito.Mockito.clearInvocations;
-import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -43,6 +42,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
 import org.apache.commons.lang3.RandomStringUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.glassfish.jersey.server.ServerProperties;
 import org.glassfish.jersey.test.grizzly.GrizzlyWebTestContainerFactory;
 import org.junit.jupiter.api.AfterEach;
@@ -52,6 +52,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.NullSource;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -90,6 +91,7 @@ import org.whispersystems.textsecuregcm.storage.Device;
 import org.whispersystems.textsecuregcm.storage.DeviceCapability;
 import org.whispersystems.textsecuregcm.storage.DeviceSpec;
 import org.whispersystems.textsecuregcm.storage.LinkDeviceTokenAlreadyUsedException;
+import org.whispersystems.textsecuregcm.storage.PersistentTimer;
 import org.whispersystems.textsecuregcm.tests.util.AccountsHelper;
 import org.whispersystems.textsecuregcm.tests.util.AuthHelper;
 import org.whispersystems.textsecuregcm.tests.util.KeysHelper;
@@ -104,6 +106,7 @@ class DeviceControllerTest {
 
   private static final AccountsManager accountsManager = mock(AccountsManager.class);
   private static final ClientPublicKeysManager clientPublicKeysManager = mock(ClientPublicKeysManager.class);
+  private static final PersistentTimer persistentTimer = mock(PersistentTimer.class);
   private static final RateLimiters rateLimiters = mock(RateLimiters.class);
   private static final RateLimiter rateLimiter = mock(RateLimiter.class);
   @SuppressWarnings("unchecked")
@@ -123,6 +126,7 @@ class DeviceControllerTest {
       accountsManager,
       clientPublicKeysManager,
       rateLimiters,
+      persistentTimer,
       deviceConfiguration);
 
   @RegisterExtension
@@ -160,6 +164,9 @@ class DeviceControllerTest {
 
     when(clientPublicKeysManager.setPublicKey(any(), anyByte(), any()))
         .thenReturn(CompletableFuture.completedFuture(null));
+
+    when(persistentTimer.start(anyString(), anyString()))
+        .thenReturn(CompletableFuture.completedFuture(mock(PersistentTimer.Sample.class)));
 
     AccountsHelper.setupMockUpdate(accountsManager);
   }
@@ -955,6 +962,8 @@ class DeviceControllerTest {
         .waitForNewLinkedDevice(eq(AuthHelper.VALID_UUID), eq(AuthHelper.VALID_DEVICE), eq(tokenIdentifier), any()))
         .thenReturn(CompletableFuture.completedFuture(Optional.of(deviceInfo)));
 
+    when(rateLimiter.validateAsync(AuthHelper.VALID_UUID)).thenReturn(CompletableFuture.completedFuture(null));
+
     try (final Response response = resources.getJerseyTest()
         .target("/v1/devices/wait_for_linked_device/" + tokenIdentifier)
         .request()
@@ -979,6 +988,8 @@ class DeviceControllerTest {
         .waitForNewLinkedDevice(eq(AuthHelper.VALID_UUID), eq(AuthHelper.VALID_DEVICE), eq(tokenIdentifier), any()))
         .thenReturn(CompletableFuture.completedFuture(Optional.empty()));
 
+    when(rateLimiter.validateAsync(AuthHelper.VALID_UUID)).thenReturn(CompletableFuture.completedFuture(null));
+
     try (final Response response = resources.getJerseyTest()
         .target("/v1/devices/wait_for_linked_device/" + tokenIdentifier)
         .request()
@@ -996,6 +1007,8 @@ class DeviceControllerTest {
     when(accountsManager
         .waitForNewLinkedDevice(eq(AuthHelper.VALID_UUID), eq(AuthHelper.VALID_DEVICE), eq(tokenIdentifier), any()))
         .thenReturn(CompletableFuture.failedFuture(new IllegalArgumentException()));
+
+    when(rateLimiter.validateAsync(AuthHelper.VALID_UUID)).thenReturn(CompletableFuture.completedFuture(null));
 
     try (final Response response = resources.getJerseyTest()
         .target("/v1/devices/wait_for_linked_device/" + tokenIdentifier)
@@ -1042,10 +1055,11 @@ class DeviceControllerTest {
   }
 
   @Test
-  void waitForLinkedDeviceRateLimited() throws RateLimitExceededException {
+  void waitForLinkedDeviceRateLimited() {
     final String tokenIdentifier = Base64.getUrlEncoder().withoutPadding().encodeToString(new byte[32]);
 
-    doThrow(new RateLimitExceededException(null)).when(rateLimiter).validate(AuthHelper.VALID_UUID);
+    when(rateLimiter.validateAsync(AuthHelper.VALID_UUID))
+        .thenReturn(CompletableFuture.failedFuture(new RateLimitExceededException(null)));
 
     try (final Response response = resources.getJerseyTest()
         .target("/v1/devices/wait_for_linked_device/" + tokenIdentifier)
@@ -1255,7 +1269,7 @@ class DeviceControllerTest {
   void recordRestoreAccountRequest() {
     final String token = RandomStringUtils.secure().nextAlphanumeric(16);
     final RestoreAccountRequest restoreAccountRequest =
-        new RestoreAccountRequest(RestoreAccountRequest.Method.LOCAL_BACKUP);
+        new RestoreAccountRequest(RestoreAccountRequest.Method.LOCAL_BACKUP, null);
 
     when(accountsManager.recordRestoreAccountRequest(token, restoreAccountRequest))
         .thenReturn(CompletableFuture.completedFuture(null));
@@ -1273,7 +1287,7 @@ class DeviceControllerTest {
   void recordRestoreAccountRequestBadToken() {
     final String token = RandomStringUtils.secure().nextAlphanumeric(128);
     final RestoreAccountRequest restoreAccountRequest =
-        new RestoreAccountRequest(RestoreAccountRequest.Method.LOCAL_BACKUP);
+        new RestoreAccountRequest(RestoreAccountRequest.Method.LOCAL_BACKUP, null);
 
     try (final Response response = resources.getJerseyTest()
         .target("/v1/devices/restore_account/" + token)
@@ -1287,7 +1301,7 @@ class DeviceControllerTest {
   @Test
   void recordRestoreAccountRequestInvalidRequest() {
     final String token = RandomStringUtils.secure().nextAlphanumeric(16);
-    final RestoreAccountRequest restoreAccountRequest = new RestoreAccountRequest(null);
+    final RestoreAccountRequest restoreAccountRequest = new RestoreAccountRequest(null, null);
 
     try (final Response response = resources.getJerseyTest()
         .target("/v1/devices/restore_account/" + token)
@@ -1298,11 +1312,34 @@ class DeviceControllerTest {
     }
   }
 
+  @ParameterizedTest
+  @CsvSource({
+      "0, true",
+      "4096, true",
+      "4097, false"
+  })
+  void recordRestoreAccountRequestBootstrapLengthLimit(int bootstrapLength, boolean valid) {
+    final String token = RandomStringUtils.secure().nextAlphanumeric(16);
+
+    final byte[] bootstrap = TestRandomUtil.nextBytes(bootstrapLength);
+    final RestoreAccountRequest restoreAccountRequest = new RestoreAccountRequest(
+        RestoreAccountRequest.Method.DEVICE_TRANSFER, bootstrap);
+
+    try (final Response response = resources.getJerseyTest()
+        .target("/v1/devices/restore_account/" + token)
+        .request()
+        .put(Entity.json(restoreAccountRequest))) {
+
+      assertEquals(valid ? 204 : 422, response.getStatus());
+    }
+
+  }
+
   @Test
   void waitForDeviceTransferRequest() {
     final String token = RandomStringUtils.secure().nextAlphanumeric(16);
     final RestoreAccountRequest restoreAccountRequest =
-        new RestoreAccountRequest(RestoreAccountRequest.Method.LOCAL_BACKUP);
+        new RestoreAccountRequest(RestoreAccountRequest.Method.LOCAL_BACKUP, null);
 
     when(accountsManager.waitForRestoreAccountRequest(eq(token), any()))
         .thenReturn(CompletableFuture.completedFuture(Optional.of(restoreAccountRequest)));
